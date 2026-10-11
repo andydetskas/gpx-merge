@@ -1,0 +1,5 @@
+# Ride files contain exact GPS tracks; keep them out of the repo.
+*.gpx
+*.fit
+*.tcx
+.DS_Store

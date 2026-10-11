@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPX Merge</title>
+  <meta name="description" content="Merge GPX recordings of the same ride from different devices. Runs entirely in your browser.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='9' cy='20' r='6' fill='none' stroke='%232a78d6' stroke-width='3'/%3E%3Ccircle cx='23' cy='20' r='6' fill='none' stroke='%23eb6834' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>GPX Merge</h1>
+      <p class="lede">Combine recordings of the same ride from different devices: power from one, heart rate from another, the GPS track from whichever is complete. Everything runs in this page. Your files never leave your computer.</p>
+    </header>
+
+    <label class="drop" id="drop">
+      <input type="file" id="picker" accept=".gpx,application/gpx+xml" multiple>
+      <span class="drop-title">Drop GPX files here</span>
+      <span class="drop-sub">or click to choose. Add two or more recordings of the same ride.</span>
+    </label>
+    <p class="error" id="error" role="alert" hidden></p>
+
+    <section id="files-section" hidden>
+      <h2>1. Recordings</h2>
+      <p class="hint">The base file supplies the GPS track and timestamps. Clock offsets are detected automatically from cadence (or GPS speed); adjust them if needed.</p>
+      <div class="table-wrap"><table id="files"></table></div>
+    </section>
+
+    <section id="sources-section" hidden>
+      <h2>2. What comes from where</h2>
+      <div class="grid" id="sources"></div>
+      <div class="options">
+        <label>Fill gaps up to <input type="number" id="maxfill" min="0" max="60" step="1"> s</label>
+        <label class="check"><input type="checkbox" id="filltimeline"> Borrow from other files when the chosen source has no data</label>
+        <label class="grow">Ride name <input type="text" id="ridename"></label>
+      </div>
+      <p class="hint">Gaps are filled by drawing a line between the readings either side. A power or cadence gap that ends in a zero is the start of a coast, so it is filled with 0.</p>
+    </section>
+
+    <section id="preview-section" hidden>
+      <h2>3. Preview</h2>
+      <div class="kpis" id="kpis"></div>
+      <div id="align"></div>
+      <div id="overview"></div>
+      <details id="fills"></details>
+      <div class="actions">
+        <button id="download" class="primary">Download merged GPX</button>
+        <span class="hint" id="download-note"></span>
+      </div>
+    </section>
+
+    <footer>Nothing is uploaded. Open <code>index.html</code> straight from disk, or host it anywhere static.</footer>
+  </main>
+  <script src="js/gpx.js"></script>
+  <script src="js/plot.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
