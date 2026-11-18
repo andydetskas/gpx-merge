@@ -11,7 +11,10 @@
 
   const clock = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const clockShort = t => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  const day = t => new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  const day = t => {
+    const d = new Date(t * 1000);
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+  };
   const duration = s => { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h ? h + 'h ' + String(m).padStart(2, '0') + 'm' : m + ' min'; };
   const signed = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n) + ' s';
   const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0) + '%';
