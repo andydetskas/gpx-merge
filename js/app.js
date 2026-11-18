@@ -61,6 +61,7 @@
 
   function render() {
     const has = state.files.length > 0, located = state.files.some(f => f.located);
+    $('demo-line').hidden = has;
     $('files-section').hidden = !has;
     $('no-gps').hidden = !has || located;
     $('sources-section').hidden = !located;
@@ -216,6 +217,27 @@
   // Stop a stray drop elsewhere from opening the file in the tab.
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => e.preventDefault());
+
+  // Sample recordings, made in the page by js/sample.js (loaded on first use).
+  $('demo').addEventListener('click', async () => {
+    try {
+      if (!window.GPXSample) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = 'js/sample.js';
+          s.onload = resolve;
+          s.onerror = () => reject(new Error('Couldn\'t load the sample recordings.'));
+          document.head.appendChild(s);
+        });
+      }
+      const start = new Date();
+      start.setHours(7, 30, 0, 0);
+      state.files = [];
+      await handleFiles(window.GPXSample.demoFiles(start / 1000).map(f => new File([f.data], f.name)));
+    } catch (e) {
+      showError(e.message);
+    }
+  });
 
   $('files').addEventListener('change', e => {
     const { plan, files } = state;

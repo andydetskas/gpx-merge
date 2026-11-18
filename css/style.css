@@ -71,6 +71,12 @@ code { font-size: 13px; }
 .drop-title { font-weight: 600; }
 .drop-sub { color: var(--muted); font-size: 13px; }
 .error { color: var(--danger); font-size: 14px; }
+.demo-line { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+button.link {
+  font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer;
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px;
+}
+button.link:hover { text-decoration-thickness: 2px; }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
