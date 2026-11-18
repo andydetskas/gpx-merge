@@ -1,0 +1,12 @@
+{
+  "name": "gpx-merge",
+  "private": true,
+  "description": "Merge GPX and FIT recordings of the same ride from different devices, entirely in the browser",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
