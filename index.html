@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GPX Merge</title>
-  <meta name="description" content="Merge GPX recordings of the same ride from different devices. Runs entirely in your browser.">
+  <meta name="description" content="Merge GPX and FIT recordings of the same ride from different devices. Runs entirely in your browser.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='9' cy='20' r='6' fill='none' stroke='%232a78d6' stroke-width='3'/%3E%3Ccircle cx='23' cy='20' r='6' fill='none' stroke='%23eb6834' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
 </head>
@@ -12,12 +12,12 @@
   <main>
     <header>
       <h1>GPX Merge</h1>
-      <p class="lede">Combine recordings of the same ride from different devices: power from one, heart rate from another, the GPS track from whichever is complete. Everything runs in this page. Your files never leave your computer.</p>
+      <p class="lede">Combine recordings of the same ride from different devices: power from one, heart rate from another, the GPS track from whichever is complete. Reads GPX and FIT files and writes one GPX file. Everything runs in this page. Your files never leave your computer.</p>
     </header>
 
     <label class="drop" id="drop">
-      <input type="file" id="picker" accept=".gpx,application/gpx+xml" multiple>
-      <span class="drop-title">Drop GPX files here</span>
+      <input type="file" id="picker" accept=".gpx,.fit,.gz,application/gpx+xml" multiple>
+      <span class="drop-title">Drop GPX or FIT files here</span>
       <span class="drop-sub">or click to choose. Add two or more recordings of the same ride.</span>
     </label>
     <p class="error" id="error" role="alert" hidden></p>
@@ -26,6 +26,7 @@
       <h2>1. Recordings</h2>
       <p class="hint">The base file supplies the GPS track and timestamps. Clock offsets are detected automatically from cadence (or GPS speed); adjust them if needed.</p>
       <div class="table-wrap"><table id="files"></table></div>
+      <p class="error" id="no-gps" hidden>None of these recordings has a GPS track, so there is no route to write. Add one that does.</p>
     </section>
 
     <section id="sources-section" hidden>
@@ -53,6 +54,7 @@
 
     <footer>Nothing is uploaded. Open <code>index.html</code> straight from disk, or host it anywhere static.</footer>
   </main>
+  <script src="js/fit.js"></script>
   <script src="js/gpx.js"></script>
   <script src="js/plot.js"></script>
   <script src="js/app.js"></script>

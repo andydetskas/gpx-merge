@@ -17,17 +17,28 @@
   const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0) + '%';
 
   function shortName(f) {
-    return f.fileName.replace(/\.gpx$/i, '');
+    return f.fileName.replace(/\.(gpx|fit)$/i, '');
   }
 
   // ---------- loading ----------
+
+  async function readFile(file) {
+    // A long ride is a few MB as FIT, tens of MB as GPX. Anything far bigger was dropped by mistake.
+    if (file.size > 200e6) throw new Error('Too large to be a ride recording.');
+    let bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      // Gzipped, as in a Strava bulk export (ride.fit.gz).
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    return G.parseFile(bytes, file.name.replace(/\.gz$/i, ''));
+  }
 
   async function handleFiles(list) {
     const errors = [];
     for (const file of list) {
       try {
-        const text = await file.text();
-        state.files.push(G.parseGPX(text, file.name));
+        state.files.push(await readFile(file));
       } catch (e) {
         errors.push(file.name + ': ' + e.message);
       }
@@ -49,12 +60,14 @@
   // ---------- rendering ----------
 
   function render() {
-    const has = state.files.length > 0;
+    const has = state.files.length > 0, located = state.files.some(f => f.located);
     $('files-section').hidden = !has;
-    $('sources-section').hidden = !has;
-    $('preview-section').hidden = !has;
+    $('no-gps').hidden = !has || located;
+    $('sources-section').hidden = !located;
+    $('preview-section').hidden = !located;
     if (!has) return;
     renderFiles();
+    if (!located) return;
     renderSources();
     runMerge();
   }
@@ -65,11 +78,16 @@
       const chips = G.CHANNELS.filter(c => f.coverage[c]).map(c => '<span class="chip">' + G.CHANNEL_LABELS[c] + '</span>').join('');
       const d = plan.detected[i];
       const note = i === plan.base ? 'base clock' : d.method === 'none' ? 'no overlap found' : 'auto ' + signed(d.offset) + ' (' + (d.method === 'cad' ? 'cadence' : 'speed') + ')';
+      const noFix = f.pts.length - f.located;
+      const notes = [
+        f.gaps && f.gaps + ' gaps, ' + f.gapSeconds + ' s',
+        noFix && (f.located ? noFix.toLocaleString() + ' without GPS' : 'no GPS'),
+      ].filter(Boolean);
       return '<tr>' +
-        '<td><input type="radio" name="base" value="' + i + '"' + (i === plan.base ? ' checked' : '') + ' aria-label="Use as base"></td>' +
-        '<td class="name">' + esc(shortName(f)) + '<small>' + esc(f.creator || 'Unknown app') + '</small></td>' +
+        '<td><input type="radio" name="base" value="' + i + '"' + (i === plan.base ? ' checked' : '') + (f.located ? '' : ' disabled') + ' aria-label="Use as base"></td>' +
+        '<td class="name">' + esc(shortName(f)) + '<small>' + esc(f.creator || 'Unknown app') + ' · ' + f.format.toUpperCase() + '</small></td>' +
         '<td>' + day(f.start) + '<br>' + clock(f.start) + ' – ' + clock(f.end) + '</td>' +
-        '<td>' + f.pts.length.toLocaleString() + (f.gaps ? '<br><small>' + f.gaps + ' gaps, ' + f.gapSeconds + ' s</small>' : '') + '</td>' +
+        '<td>' + f.pts.length.toLocaleString() + notes.map(n => '<br><small>' + n + '</small>').join('') + '</td>' +
         '<td><div class="chips">' + chips + '</div></td>' +
         '<td><div class="offset"><input type="number" step="1" data-offset="' + i + '" value="' + (plan.offsets[i] || 0) + '"' + (i === plan.base ? ' disabled' : '') + ' aria-label="Clock offset in seconds"><small>' + note + '</small></div></td>' +
         '<td><button class="icon" data-remove="' + i + '" aria-label="Remove ' + esc(f.fileName) + '">×</button></td>' +
@@ -193,7 +211,8 @@
   $('picker').addEventListener('change', e => { handleFiles([...e.target.files]); e.target.value = ''; });
   ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
   ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
-  drop.addEventListener('drop', e => handleFiles([...e.dataTransfer.files].filter(f => /\.gpx$/i.test(f.name) || f.type.includes('gpx'))));
+  // Every dropped file is passed on: one that isn't GPX or FIT gets an error that says so.
+  drop.addEventListener('drop', e => handleFiles([...e.dataTransfer.files]));
   // Stop a stray drop elsewhere from opening the file in the tab.
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => e.preventDefault());

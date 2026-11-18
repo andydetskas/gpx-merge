@@ -1,7 +1,9 @@
-// GPX parsing, clock alignment, merging and writing.
+// GPX and FIT parsing, clock alignment, merging and GPX writing.
 // No DOM dependencies, so it runs in the browser (window.GPXMerge) and in Node (require).
 (function (root) {
   'use strict';
+
+  const FIT = typeof module !== 'undefined' && module.exports ? require('./fit.js') : root.FITReader;
 
   const CHANNELS = ['ele', 'power', 'hr', 'cad', 'atemp'];
   const CHANNEL_LABELS = { ele: 'Elevation', power: 'Power', hr: 'Heart rate', cad: 'Cadence', atemp: 'Temperature' };
@@ -55,21 +57,58 @@
       }
       if (isFinite(p.t) && isFinite(p.lat) && isFinite(p.lon) && !bySecond.has(p.t)) bySecond.set(p.t, p);
     }
+    return summarize({ fileName, format: 'gpx', creator, name, type }, bySecond);
+  }
 
+  // FIT records can lack a position (before the first fix, in a tunnel). They are
+  // kept, so their power or heart rate can still be used, but never become track points.
+  function parseFIT(bytes, fileName) {
+    const fit = FIT.decode(bytes);
+    const bySecond = new Map();
+    for (const r of fit.records) {
+      let p = bySecond.get(r.t);
+      if (!p) bySecond.set(r.t, (p = { t: r.t, timeS: isoSecond(r.t) }));
+      // Some devices write two records in the same second; the first value of each field wins.
+      if (p.lat == null && r.lat != null) {
+        p.lat = r.lat; p.lon = r.lon; p.latS = r.lat.toFixed(7); p.lonS = r.lon.toFixed(7);
+      }
+      if (p.ele == null && r.ele != null) { p.ele = r.ele; p.eleS = String(r.ele); }
+      for (const c of ['power', 'hr', 'cad', 'atemp']) if (p[c] == null && r[c] != null) p[c] = r[c];
+    }
+    return summarize({ fileName, format: 'fit', creator: fit.creator, name: '', type: fit.sportName }, bySecond);
+  }
+
+  function summarize(file, bySecond) {
     const pts = [...bySecond.values()].sort((a, b) => a.t - b.t);
-    if (!pts.length) throw new Error('No timestamped track points found in ' + fileName);
-
+    if (!pts.length) throw new Error('No timestamped track points found.');
     const coverage = {};
     for (const c of CHANNELS) coverage[c] = pts.filter(p => p[c] != null).length;
+    const located = pts.filter(hasFix).length;
     let gaps = 0, gapSeconds = 0;
     for (let i = 1; i < pts.length; i++) {
       const d = pts[i].t - pts[i - 1].t;
       if (d > 2) { gaps++; gapSeconds += d - 1; }
     }
-    return { fileName, creator, name, type, pts, coverage, gaps, gapSeconds, start: pts[0].t, end: pts[pts.length - 1].t };
+    return Object.assign(file, { pts, coverage, located, gaps, gapSeconds, start: pts[0].t, end: pts[pts.length - 1].t });
+  }
+
+  // Reads a GPX or FIT file, telling them apart by content rather than by name.
+  // data: Uint8Array, ArrayBuffer or (GPX only) a string.
+  function parseFile(data, fileName) {
+    if (typeof data !== 'string') {
+      const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+      if (FIT.isFIT(u8)) return parseFIT(u8, fileName);
+      if (u8[0] === 0x50 && u8[1] === 0x4b) throw new Error('This is a .zip archive. Unzip it and add the file inside.');
+      data = new TextDecoder().decode(u8);
+    }
+    if (/<TrainingCenterDatabase\b/.test(data)) throw new Error('TCX files aren\'t supported yet. Export the ride as GPX or FIT.');
+    if (!/<gpx\b/.test(data)) throw new Error('Not a GPX or FIT file.');
+    return parseGPX(data, fileName);
   }
 
   // ---------- helpers ----------
+
+  const hasFix = p => p.lat != null;
 
   function haversine(a, b) {
     const R = 6371000, rad = Math.PI / 180;
@@ -81,7 +120,7 @@
     if (file.hasSpeed) return;
     for (let i = 1; i < file.pts.length; i++) {
       const a = file.pts[i - 1], b = file.pts[i], dt = b.t - a.t;
-      if (dt > 0 && dt <= 5) b.speed = haversine(a, b) / dt;
+      if (dt > 0 && dt <= 5 && hasFix(a) && hasFix(b)) b.speed = haversine(a, b) / dt;
     }
     file.hasSpeed = true;
   }
@@ -127,9 +166,11 @@
   // ---------- planning ----------
 
   function autoPlan(files) {
-    const powered = files.map((f, i) => [f.coverage.power, i]).filter(([c]) => c > 0).sort((a, b) => b[0] - a[0]);
-    const base = powered.length ? powered[0][1] : files.map((f, i) => [f.pts.length, i]).sort((a, b) => b[0] - a[0])[0][1];
-    const plan = { base, offsets: [], detected: [], sources: {}, maxFill: 5, fillTimeline: true, name: files[base].name || 'Merged ride' };
+    // The base supplies the track, so it has to have GPS. Prefer the one with power.
+    const powered = files.map((f, i) => [f.coverage.power, i]).filter(([c, i]) => c > 0 && files[i].located).sort((a, b) => b[0] - a[0]);
+    const base = powered.length ? powered[0][1] : files.map((f, i) => [f.located, i]).sort((a, b) => b[0] - a[0])[0][1];
+    const name = files[base].name || (files.find(f => f.name) || {}).name || 'Merged ride';
+    const plan = { base, offsets: [], detected: [], sources: {}, maxFill: 5, fillTimeline: true, name };
     planOffsets(files, plan);
     for (const ch of CHANNELS) {
       let pick = null;
@@ -177,12 +218,12 @@
     const base = files[plan.base];
     const idx = files.map((f, i) => shiftedIndex(f, i === plan.base ? 0 : plan.offsets[i] || 0));
 
-    // Timeline: every base point, plus points from other files wherever the base
-    // has nothing within 3 s (a dropout, or a late start / early stop).
-    const timeline = base.pts.map(p => ({ t: p.t, src: plan.base, p }));
+    // Timeline: every base point with a GPS fix, plus points from other files wherever
+    // the base has no fix within 3 s (a dropout, or a late start / early stop).
+    const timeline = base.pts.filter(hasFix).map(p => ({ t: p.t, src: plan.base, p }));
     let inserted = 0;
     if (plan.fillTimeline && files.length > 1) {
-      const baseTimes = base.pts.map(p => p.t);
+      const baseTimes = timeline.map(e => e.t);
       const taken = new Set(baseTimes);
       const nearestDist = t => {
         let lo = 0, hi = baseTimes.length - 1;
@@ -194,7 +235,7 @@
       files.forEach((f, i) => {
         if (i === plan.base) return;
         for (const [t, p] of idx[i]) {
-          if (taken.has(t) || nearestDist(t) <= 3) continue;
+          if (!hasFix(p) || taken.has(t) || nearestDist(t) <= 3) continue;
           timeline.push({ t, src: i, p });
           taken.add(t);
           inserted++;
@@ -391,7 +432,7 @@
 
   const API = {
     CHANNELS, CHANNEL_LABELS, CHANNEL_UNITS,
-    parseGPX, detectOffset, autoPlan, planOffsets, merge, computeStats, perMinute, alignmentWindow, writeGPX,
+    parseFile, parseGPX, parseFIT, detectOffset, autoPlan, planOffsets, merge, computeStats, perMinute, alignmentWindow, writeGPX,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   else root.GPXMerge = API;

@@ -1,5 +1,8 @@
 # Ride files contain exact GPS tracks; keep them out of the repo.
+# (.gz and .zip: Strava bulk exports and Garmin Connect's Export Original.)
 *.gpx
 *.fit
 *.tcx
+*.gz
+*.zip
 .DS_Store
