@@ -5,7 +5,9 @@
   const $ = id => document.getElementById(id);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const state = { files: [], plan: null, result: null, charts: [] };
+  // result: the merge the preview shows (GPX when any file has GPS, else FIT). fit: the FIT merge,
+  // which also keeps seconds without a position.
+  const state = { files: [], plan: null, result: null, fit: null, charts: [] };
 
   // ---------- formatting ----------
 
@@ -18,6 +20,9 @@
   const duration = s => { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h ? h + 'h ' + String(m).padStart(2, '0') + 'm' : m + ' min'; };
   const signed = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n) + ' s';
   const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0) + '%';
+  const METHOD = { cad: 'cadence', speed: 'speed', power: 'power' };
+  const ALIGN_UNIT = { cad: 'rpm', speed: 'km/h', power: 'W' };
+  const hasGPS = () => state.files.some(f => f.located);
 
   function shortName(f) {
     return f.fileName.replace(/\.(gpx|fit)$/i, '');
@@ -63,32 +68,35 @@
   // ---------- rendering ----------
 
   function render() {
-    const has = state.files.length > 0, located = state.files.some(f => f.located);
+    const has = state.files.length > 0, gps = hasGPS();
     $('demo-line').hidden = has;
     $('files-section').hidden = !has;
-    $('no-gps').hidden = !has || located;
-    $('sources-section').hidden = !located;
-    $('preview-section').hidden = !located;
+    $('sources-section').hidden = !has;
+    $('preview-section').hidden = !has;
+    // With no GPS anywhere there is no track for a GPX file: FIT only.
+    $('no-gps').hidden = !has || gps;
+    $('download').hidden = !gps;
+    $('download-fit').className = gps ? 'secondary' : 'primary';
     if (!has) return;
     renderFiles();
-    if (!located) return;
     renderSources();
     runMerge();
   }
 
   function renderFiles() {
     const { files, plan } = state;
+    const gps = hasGPS();
     const rows = files.map((f, i) => {
       const chips = G.CHANNELS.filter(c => f.coverage[c]).map(c => '<span class="chip">' + G.CHANNEL_LABELS[c] + '</span>').join('');
       const d = plan.detected[i];
-      const note = i === plan.base ? 'base clock' : d.method === 'none' ? 'no overlap found' : 'auto ' + signed(d.offset) + ' (' + (d.method === 'cad' ? 'cadence' : 'speed') + ')';
+      const note = i === plan.base ? 'base clock' : d.method === 'none' ? 'no overlap found' : 'auto ' + signed(d.offset) + ' (' + METHOD[d.method] + ')';
       const noFix = f.pts.length - f.located;
       const notes = [
         f.gaps && f.gaps + ' gaps, ' + f.gapSeconds + ' s',
         noFix && (f.located ? noFix.toLocaleString() + ' without GPS' : 'no GPS'),
       ].filter(Boolean);
       return '<tr>' +
-        '<td><input type="radio" name="base" value="' + i + '"' + (i === plan.base ? ' checked' : '') + (f.located ? '' : ' disabled') + ' aria-label="Use as base"></td>' +
+        '<td><input type="radio" name="base" value="' + i + '"' + (i === plan.base ? ' checked' : '') + (f.located || !gps ? '' : ' disabled') + ' aria-label="Use as base"></td>' +
         '<td class="name">' + esc(shortName(f)) + '<small>' + esc(f.creator || 'Unknown app') + ' · ' + f.format.toUpperCase() + '</small></td>' +
         '<td>' + day(f.start) + '<br>' + clock(f.start) + ' – ' + clock(f.end) + '</td>' +
         '<td>' + f.pts.length.toLocaleString() + notes.map(n => '<br><small>' + n + '</small>').join('') + '</td>' +
@@ -116,7 +124,8 @@
 
   function runMerge() {
     const { files, plan } = state;
-    state.result = G.merge(files, plan);
+    state.fit = G.merge(files, plan, { format: 'fit' });
+    state.result = hasGPS() ? G.merge(files, plan) : state.fit;
     renderPreview();
   }
 
@@ -125,12 +134,12 @@
     const s = result.stats;
     const tiles = [
       ['Elapsed', duration(s.elapsed)],
-      ['Distance', (s.distance / 1609.344).toFixed(2) + ' mi'],
+      s.distance > 0 && ['Distance', (s.distance / 1609.344).toFixed(2) + ' mi'],
       s.avgPower != null && ['Avg / NP power', Math.round(s.avgPower) + ' / ' + (s.np ? Math.round(s.np) : '–') + ' W'],
       s.maxPower != null && ['Max power', Math.round(s.maxPower) + ' W'],
       s.avgHr != null && ['Avg / max HR', Math.round(s.avgHr) + ' / ' + Math.round(s.maxHr)],
       s.avgCad != null && ['Avg cadence', Math.round(s.avgCad) + ' rpm'],
-      s.gain != null && ['Climbing (approx.)', Math.round(s.gain * 3.281).toLocaleString() + ' ft'],
+      s.coverage.ele > 0 && ['Climbing (approx.)', Math.round(s.gain * 3.281).toLocaleString() + ' ft'],
       s.ef != null && ['Efficiency (NP/HR)', s.ef.toFixed(2)],
     ].filter(Boolean);
     $('kpis').innerHTML = tiles.map(([k, v]) => '<div class="kpi"><span>' + k + '</span><b>' + v + '</b></div>').join('');
@@ -141,7 +150,7 @@
       if (i === plan.base) return;
       const w = G.alignmentWindow(files, plan, i);
       if (!w) return;
-      const unit = w.key === 'cad' ? 'cadence' : 'speed';
+      const unit = METHOD[w.key];
       alignHtml.push('<div class="chart-block"><p class="chart-title">Clock check: ' + esc(shortName(f)) + ' vs ' + esc(shortName(files[plan.base])) + '</p>' +
         '<p class="chart-sub">Two minutes of ' + unit + ' from ' + clock(w.start) + '. The corrected line should rise and fall with the base.</p>' +
         '<div class="legend"><span><i style="border-color:var(--s1)"></i>' + esc(shortName(files[plan.base])) + ' (base)</span>' +
@@ -155,7 +164,7 @@
       const w = alignData[k];
       state.charts.push(Plot.lineChart(cv, {
         labels: w.base.map((_, j) => clock(w.start + j)),
-        unit: w.key === 'cad' ? 'rpm' : 'km/h',
+        unit: ALIGN_UNIT[w.key],
         yMin: 0,
         series: [
           { label: 'Raw', data: w.raw, color: '--s3', dash: [2, 4], width: 1.5 },
@@ -187,9 +196,11 @@
 
     const missing = G.CHANNELS.filter(c => plan.sources[c] != null && s.coverage[c] < s.points)
       .map(c => G.CHANNEL_LABELS[c].toLowerCase() + ' on ' + (s.points - s.coverage[c]).toLocaleString());
+    const noFix = result === state.fit ? 0 : state.fit.points.filter(p => p.lat == null).length;
     $('download-note').textContent = s.points.toLocaleString() + ' points' +
       (result.inserted ? ', ' + result.inserted.toLocaleString() + ' taken from other files' : '') +
-      (missing.length ? '. Still blank: ' + missing.join(', ') + ' points.' : '. No blanks.');
+      (missing.length ? '. Still blank: ' + missing.join(', ') + ' points.' : '. No blanks.') +
+      (noFix ? ' The FIT also keeps ' + noFix.toLocaleString() + (noFix === 1 ? ' second' : ' seconds') + ' recorded without GPS.' : '');
   }
 
   function renderFills() {
@@ -222,7 +233,7 @@
   window.addEventListener('drop', e => e.preventDefault());
 
   // Sample recordings, made in the page by js/sample.js (loaded on first use).
-  $('demo').addEventListener('click', async () => {
+  async function loadSamples(make) {
     try {
       if (!window.GPXSample) {
         await new Promise((resolve, reject) => {
@@ -236,11 +247,13 @@
       const start = new Date();
       start.setHours(7, 30, 0, 0);
       state.files = [];
-      await handleFiles(window.GPXSample.demoFiles(start / 1000).map(f => new File([f.data], f.name)));
+      await handleFiles(make(window.GPXSample)(start / 1000).map(f => new File([f.data], f.name)));
     } catch (e) {
       showError(e.message);
     }
-  });
+  }
+  $('demo').addEventListener('click', () => loadSamples(S => S.demoFiles));
+  $('demo-indoor').addEventListener('click', () => loadSamples(S => S.indoorDemoFiles));
 
   $('files').addEventListener('change', e => {
     const { plan, files } = state;
@@ -268,19 +281,24 @@
   $('filltimeline').addEventListener('change', e => { state.plan.fillTimeline = e.target.checked; runMerge(); });
   $('ridename').addEventListener('input', e => { state.plan.name = e.target.value; });
 
-  $('download').addEventListener('click', () => {
-    const { files, plan, result } = state;
-    const base = files[plan.base];
-    const xml = G.writeGPX(result, { name: plan.name, creator: base.creator, type: base.type });
-    const blob = new Blob([xml], { type: 'application/gpx+xml' });
+  // The merged file is described as coming from the base recording's device.
+  function outputMeta() {
+    const { files, plan } = state, base = files[plan.base];
+    return { name: plan.name, creator: base.creator, type: base.type, device: base.device, sport: base.sport, subSport: base.subSport, utcOffset: base.utcOffset };
+  }
+
+  function save(data, type, ext) {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = (plan.name || 'ride').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_') + '_merged.gpx';
+    a.href = URL.createObjectURL(new Blob([data], { type }));
+    a.download = (state.plan.name || 'ride').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_') + '_merged.' + ext;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  });
+  }
+
+  $('download').addEventListener('click', () => save(G.writeGPX(state.result, outputMeta()), 'application/gpx+xml', 'gpx'));
+  $('download-fit').addEventListener('click', () => save(G.writeFIT(state.fit, outputMeta()), 'application/vnd.ant.fit', 'fit'));
 
   let resizeTimer;
   const redrawAll = () => state.charts.forEach(c => c.redraw());

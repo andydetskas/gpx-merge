@@ -12,7 +12,7 @@
   <main>
     <header>
       <h1>GPX Merge</h1>
-      <p class="lede">Combine recordings of the same ride from different devices: power from one, heart rate from another, the GPS track from whichever is complete. Reads GPX and FIT files and writes one GPX file. Everything runs in this page. Your files never leave your computer.</p>
+      <p class="lede">Combine recordings of the same ride from different devices: power from one, heart rate from another, the GPS track from whichever is complete. Reads GPX and FIT files and writes one GPX or FIT file, so indoor rides with no GPS work too. Everything runs in this page. Your files never leave your computer.</p>
     </header>
 
     <label class="drop" id="drop">
@@ -20,14 +20,14 @@
       <span class="drop-title">Drop GPX or FIT files here</span>
       <span class="drop-sub">or click to choose. Add two or more recordings of the same ride.</span>
     </label>
-    <p class="demo-line" id="demo-line">No ride files handy? <button type="button" class="link" id="demo">Load two sample recordings</button> of a made-up ride: a FIT file from a bike computer and a GPX file from a watch.</p>
+    <p class="demo-line" id="demo-line">No ride files handy? <button type="button" class="link" id="demo">Load two sample recordings</button> of a made-up ride: a FIT file from a bike computer and a GPX file from a watch. Or try <button type="button" class="link" id="demo-indoor">an indoor session</button> with no GPS, from a trainer app and a watch.</p>
     <p class="error" id="error" role="alert" hidden></p>
 
     <section id="files-section" hidden>
       <h2>1. Recordings</h2>
-      <p class="hint">The base file supplies the GPS track and timestamps. Clock offsets are detected automatically from cadence (or GPS speed); adjust them if needed.</p>
+      <p class="hint">The base file supplies the timestamps, and the GPS track if there is one. Clock offsets are detected automatically from cadence, GPS speed or power; adjust them if needed.</p>
       <div class="table-wrap"><table id="files"></table></div>
-      <p class="error" id="no-gps" hidden>None of these recordings has a GPS track, so there is no route to write. Add one that does.</p>
+      <p class="note" id="no-gps" hidden>None of these recordings has GPS, so this is merged as an indoor ride and written as FIT. GPX needs a position for every point; FIT doesn't.</p>
     </section>
 
     <section id="sources-section" hidden>
@@ -49,6 +49,7 @@
       <details id="fills"></details>
       <div class="actions">
         <button id="download" class="primary">Download merged GPX</button>
+        <button id="download-fit" class="secondary">Download merged FIT</button>
         <span class="hint" id="download-note"></span>
       </div>
     </section>
