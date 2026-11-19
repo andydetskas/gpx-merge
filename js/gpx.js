@@ -3,7 +3,7 @@
 (function (root) {
   'use strict';
 
-  const FIT = typeof module !== 'undefined' && module.exports ? require('./fit.js') : root.FITReader;
+  const FIT = typeof module !== 'undefined' && module.exports ? require('./fit.js') : root.FIT;
 
   const CHANNELS = ['ele', 'power', 'hr', 'cad', 'atemp'];
   const CHANNEL_LABELS = { ele: 'Elevation', power: 'Power', hr: 'Heart rate', cad: 'Cadence', atemp: 'Temperature' };

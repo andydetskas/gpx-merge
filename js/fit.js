@@ -1,7 +1,7 @@
-// A small FIT decoder: reads the messages GPX Merge needs (file id, sport and
-// the per-second records) and skips everything else. Unfinished files from a
-// device that died mid-ride are read up to where they stop.
-// No dependencies, so it runs in the browser (window.FITReader) and in Node (require).
+// A small FIT decoder and encoder. The decoder reads the messages GPX Merge needs
+// (file id, sport and the per-second records) and skips everything else. Unfinished
+// files from a device that died mid-ride are read up to where they stop.
+// No dependencies, so it runs in the browser (window.FIT) and in Node (require).
 (function (root) {
   'use strict';
 
@@ -149,7 +149,107 @@
     return out;
   }
 
-  const API = { decode, isFIT, FIT_EPOCH };
+  // ---------- encoding ----------
+
+  // FIT CRC-16, as specified in the FIT protocol: each byte is fed in two nibbles.
+  const CRC_TABLE = [0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401, 0xa001, 0x6c00, 0x7800, 0xb401, 0x5000, 0x9c01, 0x8801, 0x4400];
+  function crc16(bytes, from = 0, to = bytes.length) {
+    let crc = 0;
+    for (let i = from; i < to; i++) {
+      const b = bytes[i];
+      crc = ((crc >> 4) & 0x0fff) ^ CRC_TABLE[crc & 0xf] ^ CRC_TABLE[b & 0xf];
+      crc = ((crc >> 4) & 0x0fff) ^ CRC_TABLE[crc & 0xf] ^ CRC_TABLE[b >> 4];
+    }
+    return crc;
+  }
+
+  // Base types by name: [base type byte, size, invalid value, lowest and highest valid value].
+  const TYPES = {
+    enum: [0x00, 1, 0xff, 0, 0xfe], sint8: [0x01, 1, 0x7f, -0x80, 0x7e], uint8: [0x02, 1, 0xff, 0, 0xfe],
+    sint16: [0x83, 2, 0x7fff, -0x8000, 0x7ffe], uint16: [0x84, 2, 0xffff, 0, 0xfffe],
+    sint32: [0x85, 4, 0x7fffffff, -0x80000000, 0x7ffffffe], uint32: [0x86, 4, 0xffffffff, 0, 0xfffffffe],
+    string: [0x07, 0, 0], float32: [0x88, 4, NaN],
+    uint8z: [0x0a, 1, 0, 1, 0xff], uint16z: [0x8b, 2, 0, 1, 0xffff], uint32z: [0x8c, 4, 0, 1, 0xffffffff],
+  };
+  const PROFILE_VERSION = 2132;
+  const utf8Out = new TextEncoder();
+
+  // messages: [{ global, local = 0, fields: [[num, type, value, size?]] }], written in order.
+  // A definition is written whenever a local type's layout changes. Numbers are rounded, and
+  // one that is missing or out of range for its type is written as FIT's "invalid" value.
+  // Strings are cut to `size` bytes (default: their length), always null-terminated.
+  // To produce the variants the decoder has to handle, a message can also set bigEndian,
+  // dev: [[num, size, index]] (developer fields, written as zeros) and timeOffset (0-31, for
+  // a compressed-timestamp header), and opts can set headerSize (12 or 14) and dataSize
+  // (written into the header in place of the real size, to mimic an unfinished file).
+  function encode(messages, opts = {}) {
+    const headerSize = opts.headerSize || 14;
+    const body = [];
+    const layouts = [];
+    const scratch = new DataView(new ArrayBuffer(8));
+    const push16 = (v, le) => (le ? body.push(v & 0xff, v >> 8 & 0xff) : body.push(v >> 8 & 0xff, v & 0xff));
+    for (const m of messages) {
+      const local = m.local || 0, le = !m.bigEndian, dev = m.dev || [];
+      const fields = m.fields.map(([num, type, value, size]) => {
+        const t = TYPES[type];
+        if (!t) throw new Error('Unknown FIT base type: ' + type);
+        if (type !== 'string') return { num, type, t, value, size: t[1] };
+        let bytes = utf8Out.encode(value == null ? '' : String(value));
+        size = size || bytes.length + 1;
+        if (bytes.length >= size) {
+          let n = size - 1;
+          while (n > 0 && (bytes[n] & 0xc0) === 0x80) n--; // don't cut a character in half
+          bytes = bytes.subarray(0, n);
+        }
+        return { num, type, t, bytes, size };
+      });
+      const layout = m.global + (le ? 'L' : 'B') + fields.map(f => f.num + ':' + f.size + ':' + f.t[0]).join() + '/' + dev.join(';');
+      if (layouts[local] !== layout) {
+        layouts[local] = layout;
+        body.push(0x40 | (dev.length ? 0x20 : 0) | local, 0, le ? 0 : 1);
+        push16(m.global, le);
+        body.push(fields.length);
+        for (const f of fields) body.push(f.num, f.size, f.t[0]);
+        if (dev.length) { body.push(dev.length); for (const d of dev) body.push(d[0], d[1], d[2]); }
+      }
+      body.push(m.timeOffset != null ? 0x80 | (local << 5) | (m.timeOffset & 0x1f) : local);
+      for (const f of fields) {
+        if (f.bytes) {
+          for (let k = 0; k < f.size; k++) body.push(k < f.bytes.length ? f.bytes[k] : 0);
+          continue;
+        }
+        const [, width, invalid, lo, hi] = f.t;
+        if (f.type === 'float32') {
+          if (Number.isFinite(f.value)) scratch.setFloat32(0, f.value, le);
+          else scratch.setUint32(0, 0xffffffff);
+        } else {
+          let v = f.value == null ? NaN : Math.round(f.value);
+          if (!(v >= lo && v <= hi)) v = invalid;
+          if (width === 1) scratch.setUint8(0, v & 0xff);
+          else if (width === 2) scratch.setUint16(0, v & 0xffff, le);
+          else scratch.setUint32(0, v >>> 0, le);
+        }
+        for (let k = 0; k < width; k++) body.push(scratch.getUint8(k));
+      }
+      for (const d of dev) for (let k = 0; k < d[1]; k++) body.push(0);
+    }
+    const out = new Uint8Array(headerSize + body.length + 2);
+    const view = new DataView(out.buffer);
+    out[0] = headerSize;
+    out[1] = 0x20; // protocol 2.0
+    view.setUint16(2, PROFILE_VERSION, true);
+    view.setUint32(4, opts.dataSize != null ? opts.dataSize : body.length, true);
+    out.set([0x2e, 0x46, 0x49, 0x54], 8); // ".FIT"
+    if (headerSize === 14) view.setUint16(12, crc16(out, 0, 12), true);
+    out.set(body, headerSize);
+    view.setUint16(out.length - 2, crc16(out, 0, out.length - 2), true);
+    return out;
+  }
+
+  // Degrees to FIT's position unit.
+  const semicircles = deg => Math.round(deg * 2 ** 31 / 180);
+
+  const API = { decode, encode, isFIT, crc16, semicircles, FIT_EPOCH };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
-  else root.FITReader = API;
+  else root.FIT = API;
 })(typeof window !== 'undefined' ? window : globalThis);

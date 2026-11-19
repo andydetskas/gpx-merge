@@ -7,7 +7,7 @@ const FIT = require('../js/fit.js');
 const S = require('../js/sample.js');
 
 const T0 = 1781422200; // a Unix time; 2026-06-14T07:30:00Z
-const fitTime = t => t - S.FIT_EPOCH;
+const fitTime = t => t - FIT.FIT_EPOCH;
 
 // A short straight ride heading north, one point per second.
 function line(n, start = T0, extra = () => ({})) {
@@ -40,7 +40,7 @@ test('FIT: decodes the sample bike computer file', () => {
 });
 
 test('FIT: names the device from the manufacturer and product name', () => {
-  const file = (manufacturer, name) => FIT.decode(S.encodeFIT([
+  const file = (manufacturer, name) => FIT.decode(FIT.encode([
     { global: 0, fields: [[1, 'uint16', manufacturer], [8, 'string', name]] },
   ])).creator;
   assert.equal(file(289, 'Karoo'), 'Hammerhead Karoo');
@@ -52,7 +52,7 @@ test('FIT: names the device from the manufacturer and product name', () => {
 test('FIT: compressed timestamps, including the 32-second rollover', () => {
   const start = T0 + (30 - (fitTime(T0) % 32)); // FIT time ends in 30 (mod 32)
   assert.equal(fitTime(start) % 32, 30);
-  const bytes = S.encodeFIT([
+  const bytes = FIT.encode([
     record(start, [[7, 'uint16', 100]]),
     record(null, [[7, 'uint16', 101]], { local: 1, timeOffset: 31 }),
     record(null, [[7, 'uint16', 102]], { local: 1, timeOffset: 0 }), // rolls over: +2 s
@@ -64,8 +64,8 @@ test('FIT: compressed timestamps, including the 32-second rollover', () => {
 });
 
 test('FIT: big-endian definitions, developer fields and a 12-byte header', () => {
-  const fields = [[0, 'sint32', S.semicircles(39.6)], [1, 'sint32', S.semicircles(-2.9)], [3, 'uint8', 150], [7, 'uint16', 321], [13, 'sint8', -5], [78, 'uint32', (250 + 500) * 5]];
-  const bytes = S.encodeFIT([
+  const fields = [[0, 'sint32', FIT.semicircles(39.6)], [1, 'sint32', FIT.semicircles(-2.9)], [3, 'uint8', 150], [7, 'uint16', 321], [13, 'sint8', -5], [78, 'uint32', (250 + 500) * 5]];
+  const bytes = FIT.encode([
     record(T0, fields, { bigEndian: true, dev: [[0, 4, 0], [1, 2, 0]] }),
     record(T0 + 1, fields, { bigEndian: true, dev: [[0, 4, 0], [1, 2, 0]] }),
   ], { headerSize: 12 });
@@ -78,7 +78,7 @@ test('FIT: big-endian definitions, developer fields and a 12-byte header', () =>
 });
 
 test('FIT: invalid values, no-fix positions and plain altitude', () => {
-  const recs = FIT.decode(S.encodeFIT([
+  const recs = FIT.decode(FIT.encode([
     record(T0, [[0, 'sint32', null], [1, 'sint32', null], [7, 'uint16', null], [3, 'uint8', 140]]),
     record(T0 + 1, [[0, 'sint32', 0], [1, 'sint32', 0], [2, 'uint16', (12.4 + 500) * 5]]),
   ])).records;
@@ -91,14 +91,14 @@ test('FIT: invalid values, no-fix positions and plain altitude', () => {
 
 test('FIT: an unfinished file is read up to where it stops', () => {
   const msgs = line(5).map(p => record(p.t, [[7, 'uint16', 200]]));
-  const whole = S.encodeFIT(msgs, { dataSize: 0 });
+  const whole = FIT.encode(msgs, { dataSize: 0 });
   const cut = whole.subarray(0, whole.length - 2 - 3); // no CRC, last record half written
   assert.equal(FIT.decode(cut).records.length, 4);
 });
 
 test('FIT: chained files are read in turn', () => {
-  const a = S.encodeFIT(line(3).map(p => record(p.t, [[7, 'uint16', 1]])));
-  const b = S.encodeFIT(line(3, T0 + 3).map(p => record(p.t, [[7, 'uint16', 2]])));
+  const a = FIT.encode(line(3).map(p => record(p.t, [[7, 'uint16', 1]])));
+  const b = FIT.encode(line(3, T0 + 3).map(p => record(p.t, [[7, 'uint16', 2]])));
   const both = new Uint8Array(a.length + b.length);
   both.set(a); both.set(b, a.length);
   const recs = FIT.decode(both).records;
@@ -107,8 +107,8 @@ test('FIT: chained files are read in turn', () => {
 });
 
 test('parseFIT: two records in the same second are combined, first value wins', () => {
-  const f = G.parseFIT(S.encodeFIT([
-    record(T0, [[0, 'sint32', S.semicircles(39.6)], [1, 'sint32', S.semicircles(2.9)], [7, 'uint16', 250]]),
+  const f = G.parseFIT(FIT.encode([
+    record(T0, [[0, 'sint32', FIT.semicircles(39.6)], [1, 'sint32', FIT.semicircles(2.9)], [7, 'uint16', 250]]),
     record(T0, [[3, 'uint8', 150], [7, 'uint16', 999]], { local: 1 }),
     record(T0 + 1, [[3, 'uint8', 151]], { local: 1 }),
   ]), 'x.fit');
@@ -241,8 +241,8 @@ test('merge: a GPS dropout in a FIT base is filled with the other track, keeping
 test('merge: points without a fix in another file never become track points', () => {
   // Base GPX stops for 40 s; the other file is a FIT with no position for half of that time.
   const base = G.parseFile(S.toGPX(line(100, T0, () => ({ power: 200 })).filter((_, i) => i < 30 || i >= 70)), 'a.gpx');
-  const other = G.parseFIT(S.encodeFIT(line(100).map((p, i) => record(p.t, [
-    [0, 'sint32', i < 50 ? S.semicircles(p.lat) : null], [1, 'sint32', i < 50 ? S.semicircles(p.lon) : null], [3, 'uint8', 140],
+  const other = G.parseFIT(FIT.encode(line(100).map((p, i) => record(p.t, [
+    [0, 'sint32', i < 50 ? FIT.semicircles(p.lat) : null], [1, 'sint32', i < 50 ? FIT.semicircles(p.lon) : null], [3, 'uint8', 140],
   ]))), 'b.fit');
   const r = G.merge([base, other], G.autoPlan([base, other]));
   const added = r.points.filter(p => p.src === 1);
@@ -261,7 +261,7 @@ test('merge: elevation borrowed from another file is corrected for its bias', ()
 });
 
 test('autoPlan: a file without GPS is never the base', () => {
-  const noGps = G.parseFIT(S.encodeFIT(line(120).map(p => record(p.t, [[7, 'uint16', 250]]))), 'trainer.fit');
+  const noGps = G.parseFIT(FIT.encode(line(120).map(p => record(p.t, [[7, 'uint16', 250]]))), 'trainer.fit');
   const gps = G.parseFile(S.toGPX(line(120)), 'phone.gpx');
   assert.equal(noGps.located, 0);
   const plan = G.autoPlan([noGps, gps]);

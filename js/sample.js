@@ -1,10 +1,11 @@
 // Synthetic rides for the demo button and the tests: one made-up loop, "recorded"
 // by two devices that disagree the way real ones do. No real GPS track is involved.
-// Also holds a small FIT encoder. Runs in the browser (window.GPXSample) and in Node.
+// Runs in the browser (window.GPXSample, after js/fit.js) and in Node.
 (function (root) {
   'use strict';
 
-  const FIT_EPOCH = 631065600;
+  const FIT = typeof module !== 'undefined' && module.exports ? require('./fit.js') : root.FIT;
+  const { FIT_EPOCH, semicircles } = FIT;
 
   // ---------- deterministic randomness ----------
 
@@ -146,82 +147,6 @@
     return o.join('\n');
   }
 
-  // FIT CRC-16, as specified in the FIT protocol.
-  const CRC_TABLE = [0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401, 0xa001, 0x6c00, 0x7800, 0xb401, 0x5000, 0x9c01, 0x8801, 0x4400];
-  function crc16(bytes, from = 0, to = bytes.length) {
-    let crc = 0;
-    for (let i = from; i < to; i++) {
-      for (const nibble of [bytes[i] & 0xf, bytes[i] >> 4]) {
-        const tmp = CRC_TABLE[crc & 0xf];
-        crc = ((crc >> 4) & 0x0fff) ^ tmp ^ CRC_TABLE[nibble];
-      }
-    }
-    return crc;
-  }
-
-  // Base types: [base type byte, size, invalid value]
-  const TYPES = {
-    enum: [0x00, 1, 0xff], sint8: [0x01, 1, 0x7f], uint8: [0x02, 1, 0xff], sint16: [0x83, 2, 0x7fff],
-    uint16: [0x84, 2, 0xffff], sint32: [0x85, 4, 0x7fffffff], uint32: [0x86, 4, 0xffffffff],
-    string: [0x07, 0, 0], float32: [0x88, 4, NaN], uint8z: [0x0a, 1, 0], uint16z: [0x8b, 2, 0], uint32z: [0x8c, 4, 0],
-  };
-
-  // messages: [{ global, local = 0, bigEndian, fields: [[num, type, value, size?]], dev: [[num, size, index]], timeOffset }]
-  // A definition is written whenever a local type's layout changes. timeOffset (0-31) writes a
-  // compressed-timestamp header instead of a normal one. Developer field data is written as zeros.
-  // opts: { headerSize: 12 | 14, dataSize: override the header's data size (to mimic unfinished files) }
-  function encodeFIT(messages, opts = {}) {
-    const headerSize = opts.headerSize || 14;
-    const body = [];
-    const layouts = [];
-    const push16 = (v, le) => le ? body.push(v & 0xff, v >> 8 & 0xff) : body.push(v >> 8 & 0xff, v & 0xff);
-    for (const m of messages) {
-      const local = m.local || 0, le = !m.bigEndian;
-      const fields = m.fields.map(([num, type, value, size]) => {
-        const [code, width] = TYPES[type];
-        const bytes = type === 'string' ? new TextEncoder().encode(value || '') : null;
-        return { num, type, value, code, size: size || (bytes ? bytes.length + 1 : width), bytes };
-      });
-      const dev = m.dev || [];
-      const layout = JSON.stringify([m.global, le, fields.map(f => [f.num, f.size, f.code]), dev]);
-      if (layouts[local] !== layout) {
-        layouts[local] = layout;
-        body.push(0x40 | (dev.length ? 0x20 : 0) | local, 0, le ? 0 : 1);
-        push16(m.global, le);
-        body.push(fields.length);
-        for (const f of fields) body.push(f.num, f.size, f.code);
-        if (dev.length) { body.push(dev.length); for (const d of dev) body.push(d[0], d[1], d[2]); }
-      }
-      body.push(m.timeOffset != null ? 0x80 | (local << 5) | (m.timeOffset & 0x1f) : local);
-      for (const f of fields) {
-        const buf = new DataView(new ArrayBuffer(Math.max(8, f.size)));
-        const [, width, invalid] = TYPES[f.type];
-        if (f.bytes) { f.bytes.forEach((b, k) => buf.setUint8(k, b)); }
-        else {
-          const v = f.value == null ? invalid : f.value;
-          if (f.type === 'float32') buf.setFloat32(0, v, le);
-          else if (width === 1) buf.setUint8(0, v & 0xff);
-          else if (width === 2) buf.setUint16(0, v & 0xffff, le);
-          else buf.setUint32(0, v >>> 0, le);
-        }
-        for (let k = 0; k < f.size; k++) body.push(buf.getUint8(k));
-      }
-      for (const d of dev) for (let k = 0; k < d[1]; k++) body.push(0);
-    }
-    const out = new Uint8Array(headerSize + body.length + 2);
-    const view = new DataView(out.buffer);
-    out[0] = headerSize; out[1] = 0x20;
-    view.setUint16(2, 2132, true);
-    view.setUint32(4, opts.dataSize != null ? opts.dataSize : body.length, true);
-    out.set([0x2e, 0x46, 0x49, 0x54], 8);
-    if (headerSize === 14) view.setUint16(12, crc16(out, 0, 12), true);
-    out.set(body, headerSize);
-    view.setUint16(out.length - 2, crc16(out, 0, out.length - 2), true);
-    return out;
-  }
-
-  const semicircles = deg => Math.round(deg * 2 ** 31 / 180);
-
   // An activity FIT with a file id, one record per sample and a session.
   function toFIT(points, { productName = 'Sample bike computer', manufacturer = 255, sport = 2 } = {}) {
     const fit = t => t - FIT_EPOCH;
@@ -241,7 +166,7 @@
     }
     const last = points[points.length - 1].t;
     msgs.push({ global: 18, local: 2, fields: [[253, 'uint32', fit(last)], [2, 'uint32', fit(points[0].t)], [5, 'enum', sport]] });
-    return encodeFIT(msgs);
+    return FIT.encode(msgs);
   }
 
   // The demo pair: a FIT file from the bike computer and a GPX file from the watch.
@@ -254,7 +179,7 @@
     ];
   }
 
-  const API = { rng, ride, bikeComputer, watch, toGPX, toFIT, encodeFIT, crc16, semicircles, demoFiles, FIT_EPOCH };
+  const API = { rng, ride, bikeComputer, watch, toGPX, toFIT, demoFiles };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   else root.GPXSample = API;
 })(typeof window !== 'undefined' ? window : globalThis);

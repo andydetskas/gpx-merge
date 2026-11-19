@@ -35,12 +35,12 @@ Getting the files: most bike computers and watches can export the original FIT f
 ```
 index.html          page
 css/style.css       styles (light and dark)
-js/fit.js           FIT decoder for the messages the merge needs
+js/fit.js           FIT decoder for the messages the merge needs, and a small encoder
 js/gpx.js           parsing, alignment, merging, GPX writing
 js/plot.js          small canvas line chart
 js/app.js           UI
-js/sample.js        synthetic sample rides and a small FIT encoder (demo button and tests)
-test/merge.test.js  tests
+js/sample.js        synthetic sample rides (demo button and tests)
+test/               tests
 ```
 
 `js/fit.js`, `js/gpx.js` and `js/sample.js` have no browser dependencies, so you can script them in Node:
