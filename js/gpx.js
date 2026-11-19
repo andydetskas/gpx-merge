@@ -1,4 +1,4 @@
-// GPX and FIT parsing, clock alignment, merging and GPX writing.
+// GPX and FIT parsing, clock alignment, merging, and GPX and FIT writing.
 // No DOM dependencies, so it runs in the browser (window.GPXMerge) and in Node (require).
 (function (root) {
   'use strict';
@@ -75,7 +75,12 @@
       if (p.ele == null && r.ele != null) { p.ele = r.ele; p.eleS = String(r.ele); }
       for (const c of ['power', 'hr', 'cad', 'atemp']) if (p[c] == null && r[c] != null) p[c] = r[c];
     }
-    return summarize({ fileName, format: 'fit', creator: fit.creator, name: '', type: fit.sportName }, bySecond);
+    return summarize({
+      fileName, format: 'fit', creator: fit.creator, name: '', type: fit.sportName,
+      // Kept so a merged FIT can name the same device, sport and time zone.
+      device: { manufacturer: fit.manufacturer, product: fit.product, name: fit.productName },
+      sport: fit.sport, subSport: fit.subSport, utcOffset: fit.utcOffset,
+    }, bySecond);
   }
 
   function summarize(file, bySecond) {
@@ -315,7 +320,7 @@
     const pw = pts.filter(p => p.power != null).map(p => p.power);
     if (pw.length) {
       s.avgPower = mean(pw);
-      s.maxPower = Math.max(...pw);
+      s.maxPower = max(pw);
       if (pw.length >= 30) {
         let roll = 0, acc = 0, n = 0;
         for (let i = 0; i < pw.length; i++) {
@@ -327,24 +332,29 @@
       }
     }
     const hr = pts.filter(p => p.hr != null).map(p => p.hr);
-    if (hr.length) { s.avgHr = mean(hr); s.maxHr = Math.max(...hr); }
+    if (hr.length) { s.avgHr = mean(hr); s.maxHr = max(hr); }
     const cad = pts.filter(p => p.cad > 0).map(p => p.cad);
-    if (cad.length) s.avgCad = mean(cad);
+    if (cad.length) { s.avgCad = mean(cad); s.maxCad = max(cad); }
+    const temp = pts.filter(p => p.atemp != null).map(p => p.atemp);
+    if (temp.length) { s.avgTemp = mean(temp); s.maxTemp = max(temp); }
     if (s.np && s.avgHr) s.ef = s.np / s.avgHr;
 
-    // Climbing with a 2 m hysteresis to ignore sensor noise.
-    let gain = 0, ref = null;
+    // Climbing and descent with a 2 m hysteresis to ignore sensor noise.
+    let gain = 0, loss = 0, ref = null;
     for (const p of pts) {
       if (p.ele == null) continue;
       if (ref == null) ref = p.ele;
       else if (p.ele - ref > 2) { gain += p.ele - ref; ref = p.ele; }
-      else if (ref - p.ele > 2) ref = p.ele;
+      else if (ref - p.ele > 2) { loss += ref - p.ele; ref = p.ele; }
     }
     s.gain = gain;
+    s.loss = loss;
     return s;
   }
 
   function mean(xs) { return xs.reduce((a, b) => a + b, 0) / xs.length; }
+  // Math.max(...xs) runs out of stack on very long rides.
+  function max(xs) { return xs.reduce((a, b) => (b > a ? b : a), -Infinity); }
 
   // ---------- chart data ----------
 
@@ -430,9 +440,104 @@
     return o.join('\n');
   }
 
+  // FIT sport numbers for the GPX <type> values seen in exports; anything else is cycling.
+  const FIT_SPORTS = { running: 1, run: 1, cycling: 2, biking: 2, ride: 2, walking: 11, walk: 11, hiking: 17, hike: 17 };
+  const SUB_SPORT_GENERIC = 0, SUB_SPORT_INDOOR_CYCLING = 6;
+  // No reading from any recording for longer than this means the timer was stopped.
+  const PAUSE = 60;
+
+  // An activity FIT: file id, timer start and stop events, one record per merged point,
+  // one lap, one session and the activity, in the order Garmin's activity guide gives.
+  // meta (all optional): creator and type as for writeGPX; device { manufacturer, product,
+  // name }, sport, subSport and utcOffset (seconds) from a FIT recording, so the merge is
+  // described the same way. A parsed file has these fields, so the base file can be passed
+  // as it is. Without a device it is written as a development (255) file.
+  function writeFIT(result, meta = {}) {
+    const pts = result.points;
+    if (!pts.length) throw new Error('Nothing to write.');
+    const s = result.stats || computeStats(pts);
+    const fitTime = t => t - FIT.FIT_EPOCH;
+    const semi = FIT.semicircles;
+    const start = pts[0].t, end = pts[pts.length - 1].t;
+    const fixes = pts.filter(hasFix), first = fixes[0], last = fixes[fixes.length - 1];
+    const has = ch => s.coverage[ch] > 0;
+    const device = meta.device || {};
+    const sport = meta.sport != null ? meta.sport : FIT_SPORTS[String(meta.type || '').toLowerCase()] || 2;
+    const subSport = meta.subSport != null ? meta.subSport : fixes.length ? SUB_SPORT_GENERIC : SUB_SPORT_INDOOR_CYCLING;
+    const utcOffset = meta.utcOffset != null ? meta.utcOffset : -new Date(start * 1000).getTimezoneOffset() * 60;
+
+    const timer = (startOrStop, t) => ({ global: 21, local: 1, fields: [[253, 'uint32', fitTime(t)], [0, 'enum', 0], [1, 'enum', startOrStop]] });
+    const START = 0, STOP_ALL = 4;
+    const msgs = [{
+      global: 0, local: 0, fields: [
+        [0, 'enum', 4], // activity file
+        [1, 'uint16', device.manufacturer != null ? device.manufacturer : 255],
+        [2, 'uint16', device.product],
+        [4, 'uint32', fitTime(start)],
+        [8, 'string', device.name || meta.creator || 'GPX Merge', 64],
+      ],
+    }, timer(START, start)];
+
+    // Records share one layout: only the fields this ride has.
+    let timerSecs = 0, segStart = start;
+    pts.forEach((p, i) => {
+      if (i && p.t - pts[i - 1].t > PAUSE) {
+        msgs.push(timer(STOP_ALL, pts[i - 1].t), timer(START, p.t));
+        timerSecs += pts[i - 1].t - segStart;
+        segStart = p.t;
+      }
+      const fields = [[253, 'uint32', fitTime(p.t)]];
+      if (fixes.length) fields.push([0, 'sint32', hasFix(p) ? semi(p.lat) : null], [1, 'sint32', hasFix(p) ? semi(p.lon) : null]);
+      if (has('ele')) fields.push([78, 'uint32', p.ele != null ? (p.ele + 500) * 5 : null]);
+      if (has('power')) fields.push([7, 'uint16', p.power]);
+      if (has('hr')) fields.push([3, 'uint8', p.hr]);
+      if (has('cad')) fields.push([4, 'uint8', p.cad]);
+      if (has('atemp')) fields.push([13, 'sint8', p.atemp]);
+      msgs.push({ global: 20, local: 2, fields });
+    });
+    timerSecs += end - segStart;
+    msgs.push(timer(STOP_ALL, end));
+
+    // Totals, with lap and session field numbers: [lap, session, type, value]. Missing ones are left out.
+    const distance = fixes.length ? s.distance : null;
+    const totals = [
+      [253, 253, 'uint32', fitTime(end)],
+      [2, 2, 'uint32', fitTime(start)],
+      [3, 3, 'sint32', first && semi(first.lat)],
+      [4, 4, 'sint32', first && semi(first.lon)],
+      [7, 7, 'uint32', (end - start) * 1000],
+      [8, 8, 'uint32', timerSecs * 1000],
+      [9, 9, 'uint32', distance != null ? distance * 100 : null],
+      [13, 14, 'uint16', distance != null && timerSecs ? distance / timerSecs * 1000 : null],
+      [15, 16, 'uint8', s.avgHr], [16, 17, 'uint8', s.maxHr],
+      [17, 18, 'uint8', s.avgCad], [18, 19, 'uint8', s.maxCad],
+      [19, 20, 'uint16', s.avgPower], [20, 21, 'uint16', s.maxPower], [33, 34, 'uint16', s.np],
+      [21, 22, 'uint16', has('ele') ? s.gain : null], [22, 23, 'uint16', has('ele') ? s.loss : null],
+      [50, 57, 'sint8', s.avgTemp], [51, 58, 'sint8', s.maxTemp],
+      [25, 5, 'enum', sport], [39, 6, 'enum', subSport],
+    ].filter(f => f[3] != null);
+    const pick = col => totals.map(f => [f[col], f[2], f[3]]);
+    msgs.push({
+      global: 19, local: 3, fields: [[254, 'uint16', 0], [0, 'enum', 9], [1, 'enum', 1], ...pick(0),
+        ...(last ? [[5, 'sint32', semi(last.lat)], [6, 'sint32', semi(last.lon)]] : []),
+        [24, 'enum', 7]], // lap event, stop; lap trigger: session end
+    }, {
+      global: 18, local: 4, fields: [[254, 'uint16', 0], [0, 'enum', 8], [1, 'enum', 1], ...pick(1),
+        [25, 'uint16', 0], [26, 'uint16', 1], [28, 'enum', 0]], // session event, stop; first lap, 1 lap; trigger: activity end
+    }, {
+      global: 34, local: 5, fields: [
+        [253, 'uint32', fitTime(end)], [0, 'uint32', timerSecs * 1000], [1, 'uint16', 1],
+        [2, 'enum', 0], [3, 'enum', 26], [4, 'enum', 1], // manual; activity event, stop
+        [5, 'uint32', fitTime(end) + utcOffset],
+      ],
+    });
+    return FIT.encode(msgs);
+  }
+
   const API = {
     CHANNELS, CHANNEL_LABELS, CHANNEL_UNITS,
-    parseFile, parseGPX, parseFIT, detectOffset, autoPlan, planOffsets, merge, computeStats, perMinute, alignmentWindow, writeGPX,
+    parseFile, parseGPX, parseFIT, detectOffset, autoPlan, planOffsets, merge, computeStats, perMinute, alignmentWindow,
+    writeGPX, writeFIT,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   else root.GPXMerge = API;

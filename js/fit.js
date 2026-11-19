@@ -1,6 +1,6 @@
 // A small FIT decoder and encoder. The decoder reads the messages GPX Merge needs
-// (file id, sport and the per-second records) and skips everything else. Unfinished
-// files from a device that died mid-ride are read up to where they stop.
+// (file id, sport, activity and the per-second records) and skips everything else.
+// Unfinished files from a device that died mid-ride are read up to where they stop.
 // No dependencies, so it runs in the browser (window.FIT) and in Node (require).
 (function (root) {
   'use strict';
@@ -17,7 +17,7 @@
   // Byte size of each base type, indexed by base type number.
   const SIZES = [1, 1, 1, 2, 2, 4, 4, 1, 4, 8, 1, 2, 4, 1, 8, 8, 8];
 
-  const MSG = { fileId: 0, sport: 12, session: 18, record: 20 };
+  const MSG = { fileId: 0, sport: 12, session: 18, record: 20, activity: 34 };
   const utf8 = new TextDecoder();
 
   function isFIT(u8, at = 0) {
@@ -99,6 +99,7 @@
         msg[253] = lastTime;
       }
       take(def.global, msg, out);
+      if (out.messages) out.messages.push({ global: def.global, fields: msg });
     }
   }
 
@@ -118,21 +119,30 @@
     } else if (global === MSG.fileId) {
       if (out.manufacturer == null) {
         out.manufacturer = m[1] != null ? m[1] : null;
+        out.product = m[2] != null ? m[2] : null;
         out.productName = typeof m[8] === 'string' ? m[8].trim() : '';
       }
-    } else if (global === MSG.session && m[5] != null) {
-      out.sport = m[5];
-    } else if (global === MSG.sport && m[0] != null && out.sport == null) {
-      out.sport = m[0];
+    } else if (global === MSG.session) {
+      if (m[5] != null) out.sport = m[5];
+      if (m[6] != null) out.subSport = m[6];
+    } else if (global === MSG.sport) {
+      if (m[0] != null && out.sport == null) out.sport = m[0];
+      if (m[1] != null && out.subSport == null) out.subSport = m[1];
+    } else if (global === MSG.activity && m[253] != null && m[5] != null) {
+      // local_timestamp minus timestamp: the device's time zone offset, in seconds.
+      const offset = m[5] - m[253];
+      if (Math.abs(offset) <= 14 * 3600) out.utcOffset = offset;
     }
   }
 
   // bytes: Uint8Array or ArrayBuffer. Chained files (several FIT files back to back) are read in turn.
-  function decode(bytes) {
+  // opts.messages: also list every data message as { global, fields: { number: value } }, raw.
+  function decode(bytes, opts = {}) {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     if (!isFIT(u8)) throw new Error('Not a FIT file.');
     const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-    const out = { records: [], manufacturer: null, productName: '', sport: null };
+    const out = { records: [], manufacturer: null, product: null, productName: '', sport: null, subSport: null, utcOffset: null };
+    if (opts.messages) out.messages = [];
     let at = 0;
     while (isFIT(u8, at)) {
       const headerSize = u8[at];
