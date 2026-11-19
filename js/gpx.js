@@ -6,7 +6,8 @@
   const FIT = typeof module !== 'undefined' && module.exports ? require('./fit.js') : root.FIT;
 
   const CHANNELS = ['ele', 'power', 'hr', 'cad', 'atemp'];
-  const CHANNEL_LABELS = { ele: 'Elevation', power: 'Power', hr: 'Heart rate', cad: 'Cadence', atemp: 'Temperature' };
+  // gps is not a channel you pick a source for, but positions can be borrowed like one.
+  const CHANNEL_LABELS = { ele: 'Elevation', power: 'Power', hr: 'Heart rate', cad: 'Cadence', atemp: 'Temperature', gps: 'GPS position' };
   const CHANNEL_UNITS = { ele: 'm', power: 'W', hr: 'bpm', cad: 'rpm', atemp: '°C' };
   // A gap that ends in a zero reading is the start of a coast: fill it with 0, not a ramp.
   const COAST_AWARE = { power: true, cad: true };
@@ -146,14 +147,27 @@
     return m;
   }
 
+  // For sorted times, a function giving the distance from t to the nearest one (Infinity if none).
+  function distanceTo(times) {
+    return t => {
+      if (!times.length) return Infinity;
+      let lo = 0, hi = times.length - 1;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (times[mid] < t) lo = mid + 1; else hi = mid; }
+      let d = Math.abs(times[lo] - t);
+      if (lo > 0) d = Math.min(d, Math.abs(times[lo - 1] - t));
+      return d;
+    };
+  }
+
   // ---------- clock alignment ----------
 
-  // Finds the shift (seconds added to `other`) that best lines it up with `base`,
-  // by comparing cadence when both files have it, otherwise GPS speed.
+  // Finds the shift (seconds added to `other`) that best lines it up with `base`, by comparing
+  // cadence when both files have it, otherwise GPS speed, otherwise power (indoors, say).
   function detectOffset(base, other, range = 30) {
-    const useCad = base.coverage.cad > 60 && other.coverage.cad > 60;
-    const key = useCad ? 'cad' : 'speed';
-    if (!useCad) { ensureSpeed(base); ensureSpeed(other); }
+    const both = ch => base.coverage[ch] > 60 && other.coverage[ch] > 60;
+    const key = both('cad') ? 'cad' : base.located > 60 && other.located > 60 ? 'speed' : both('power') ? 'power' : null;
+    if (!key) return { offset: 0, method: 'none' };
+    if (key === 'speed') { ensureSpeed(base); ensureSpeed(other); }
     const bmap = shiftedIndex(base, 0);
     let best = null;
     for (let off = -range; off <= range; off++) {
@@ -171,9 +185,14 @@
   // ---------- planning ----------
 
   function autoPlan(files) {
-    // The base supplies the track, so it has to have GPS. Prefer the one with power.
-    const powered = files.map((f, i) => [f.coverage.power, i]).filter(([c, i]) => c > 0 && files[i].located).sort((a, b) => b[0] - a[0]);
-    const base = powered.length ? powered[0][1] : files.map((f, i) => [f.located, i]).sort((a, b) => b[0] - a[0])[0][1];
+    // The base supplies the timeline and the track, so if any recording has GPS the base
+    // has to be one of those. Prefer the one with the most power, then the most GPS (or,
+    // with no GPS anywhere, the most points).
+    const gps = files.some(f => f.located);
+    const eligible = files.map((f, i) => i).filter(i => !gps || files[i].located);
+    const powered = eligible.filter(i => files[i].coverage.power > 0).sort((a, b) => files[b].coverage.power - files[a].coverage.power);
+    const size = i => (gps ? files[i].located : files[i].pts.length);
+    const base = powered.length ? powered[0] : eligible.sort((a, b) => size(b) - size(a))[0];
     const name = files[base].name || (files.find(f => f.name) || {}).name || 'Merged ride';
     const plan = { base, offsets: [], detected: [], sources: {}, maxFill: 5, fillTimeline: true, name };
     planOffsets(files, plan);
@@ -219,28 +238,25 @@
     }
   }
 
-  function merge(files, plan) {
+  // format 'gpx' (the default) keeps only seconds with a GPS position, since GPX needs one for
+  // every point. format 'fit' keeps every second, with or without one, so a ride with no GPS
+  // at all can be merged.
+  function merge(files, plan, { format = 'gpx' } = {}) {
     const base = files[plan.base];
     const idx = files.map((f, i) => shiftedIndex(f, i === plan.base ? 0 : plan.offsets[i] || 0));
+    const usable = format === 'fit' ? () => true : hasFix;
 
-    // Timeline: every base point with a GPS fix, plus points from other files wherever
-    // the base has no fix within 3 s (a dropout, or a late start / early stop).
-    const timeline = base.pts.filter(hasFix).map(p => ({ t: p.t, src: plan.base, p }));
+    // Timeline: every usable base point, plus points from other files wherever the base
+    // has none within 3 s (a dropout, or a late start / early stop).
+    const timeline = base.pts.filter(usable).map(p => ({ t: p.t, src: plan.base, p }));
     let inserted = 0;
     if (plan.fillTimeline && files.length > 1) {
-      const baseTimes = timeline.map(e => e.t);
-      const taken = new Set(baseTimes);
-      const nearestDist = t => {
-        let lo = 0, hi = baseTimes.length - 1;
-        while (lo < hi) { const mid = (lo + hi) >> 1; if (baseTimes[mid] < t) lo = mid + 1; else hi = mid; }
-        let d = Math.abs(baseTimes[lo] - t);
-        if (lo > 0) d = Math.min(d, Math.abs(baseTimes[lo - 1] - t));
-        return d;
-      };
+      const fromBase = distanceTo(timeline.map(e => e.t));
+      const taken = new Set(timeline.map(e => e.t));
       files.forEach((f, i) => {
         if (i === plan.base) return;
         for (const [t, p] of idx[i]) {
-          if (!hasFix(p) || taken.has(t) || nearestDist(t) <= 3) continue;
+          if (!usable(p) || taken.has(t) || fromBase(t) <= 3) continue;
           timeline.push({ t, src: i, p });
           taken.add(t);
           inserted++;
@@ -291,9 +307,23 @@
       });
     }
 
+    // Only a FIT merge has seconds without a position. Where the base has no fix within 3 s
+    // either (a tunnel, or no GPS at all), the position comes from a file that has one then.
+    const fromBaseFix = distanceTo(base.pts.filter(hasFix).map(p => p.t));
+    const position = e => {
+      if (hasFix(e.p)) return e.p;
+      if (!plan.fillTimeline || fromBaseFix(e.t) <= 3) return {};
+      for (let i = 0; i < files.length; i++) {
+        const q = i !== e.src && idx[i].get(e.t);
+        if (q && hasFix(q)) { borrowed.gps = (borrowed.gps || 0) + 1; return q; }
+      }
+      return {};
+    };
+
     const points = timeline.map((e, k) => {
+      const at = position(e);
       const out = {
-        t: e.t, src: e.src, lat: e.p.lat, lon: e.p.lon, latS: e.p.latS, lonS: e.p.lonS,
+        t: e.t, src: e.src, lat: at.lat, lon: at.lon, latS: at.latS, lonS: at.lonS,
         timeS: e.src === plan.base && e.p.timeS ? e.p.timeS : isoSecond(e.t),
       };
       for (const ch of CHANNELS) if (series[ch][k] != null) out[ch] = series[ch][k];
@@ -301,7 +331,7 @@
       return out;
     });
 
-    return { points, fills, borrowed, inserted, plan, stats: computeStats(points) };
+    return { points, fills, borrowed, inserted, plan, format, stats: computeStats(points) };
   }
 
   // ---------- stats ----------
@@ -313,8 +343,13 @@
     s.start = pts[0].t;
     s.end = pts[pts.length - 1].t;
     s.elapsed = s.end - s.start;
-    let dist = 0;
-    for (let i = 1; i < pts.length; i++) dist += haversine(pts[i - 1], pts[i]);
+    // Along the track: straight from each position to the next, over any seconds without one.
+    let dist = 0, prev = null;
+    for (const p of pts) {
+      if (!hasFix(p)) continue;
+      if (prev) dist += haversine(prev, p);
+      prev = p;
+    }
     s.distance = dist;
 
     const pw = pts.filter(p => p.power != null).map(p => p.power);
@@ -375,7 +410,8 @@
   // with the other file drawn on its raw clock and on the corrected clock.
   function alignmentWindow(files, plan, otherIdx, span = 120) {
     const base = files[plan.base], other = files[otherIdx];
-    const key = plan.detected[otherIdx] && plan.detected[otherIdx].method === 'speed' ? 'speed' : 'cad';
+    const method = plan.detected[otherIdx] && plan.detected[otherIdx].method;
+    const key = method === 'speed' || method === 'power' ? method : 'cad';
     if (key === 'speed') { ensureSpeed(base); ensureSpeed(other); }
     if (!base.pts.some(p => p[key] != null) || !other.pts.some(p => p[key] != null)) return null;
     const bmap = shiftedIndex(base, 0), raw = shiftedIndex(other, 0), fixed = shiftedIndex(other, plan.offsets[otherIdx] || 0);
@@ -385,7 +421,7 @@
       for (let t = s; t < s + span; t++) {
         const v = bmap.get(t) && bmap.get(t)[key];
         if (v == null || !fixed.has(t)) continue;
-        const moving = key === 'cad' ? v > 30 : v > 2;
+        const moving = key === 'speed' ? v > 2 : v > 30; // m/s; rpm or W
         if (prev != null && moving !== prev) score++;
         prev = moving;
       }
@@ -420,6 +456,7 @@
       '  <trkseg>',
     ];
     for (const p of pts) {
+      if (!hasFix(p)) continue; // only in a FIT-format merge; GPX needs a position for every point
       o.push('   <trkpt lat="' + p.latS + '" lon="' + p.lonS + '">');
       if (p.ele != null) o.push('    <ele>' + p.eleS + '</ele>');
       o.push('    <time>' + p.timeS + '</time>');

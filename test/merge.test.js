@@ -168,6 +168,15 @@ test('alignment: finds a clock error from GPS speed', () => {
   assert.deepEqual([d.offset, d.method], [-3, 'speed']);
 });
 
+test('alignment: falls back to power when the files share no cadence or GPS', () => {
+  const truth = S.indoorRide();
+  const trainer = G.parseFile(S.toFIT(truth.map(s => ({ t: s.t, power: s.power }))), 'trainer.fit');
+  // A second power meter that reads 3% high, on a clock 4 s fast.
+  const pedals = G.parseFile(S.toFIT(truth.map(s => ({ t: s.t + 4, power: Math.round(s.power * 1.03), hr: s.hr }))), 'pedals.fit');
+  const d = G.detectOffset(trainer, pedals);
+  assert.deepEqual([d.offset, d.method], [-4, 'power']);
+});
+
 test('alignment: reports no match when the recordings do not overlap', () => {
   const a = G.parseFile(S.toGPX(line(120, T0, i => ({ cad: i % 7 ? 90 : 0 }))), 'a.gpx');
   const b = G.parseFile(S.toGPX(line(120, T0 + 3600, i => ({ cad: i % 7 ? 90 : 0 }))), 'b.gpx');
@@ -270,6 +279,16 @@ test('autoPlan: a file without GPS is never the base', () => {
   const r = G.merge([noGps, gps], plan);
   assert.equal(r.points.length, 120);
   assert.ok(r.points.every(p => p.power === 250));
+});
+
+test('autoPlan: with no GPS anywhere, the file with power is the base', () => {
+  const [trainer, watch] = S.indoorDemoFiles().map(f => G.parseFile(f.data, f.name));
+  assert.equal(trainer.located + watch.located, 0);
+  const plan = G.autoPlan([watch, trainer]);
+  assert.equal(plan.base, 1);
+  assert.deepEqual([plan.detected[0].method, plan.detected[0].offset], ['cad', -2], "the watch's clock is 2 s fast");
+  assert.deepEqual([plan.sources.power, plan.sources.hr, plan.sources.cad], [1, 0, 1]);
+  assert.equal(G.autoPlan([watch]).base, 0, 'with no power either, the one with the most points');
 });
 
 // ---------- GPX output ----------

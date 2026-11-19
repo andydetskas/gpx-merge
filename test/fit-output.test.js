@@ -123,3 +123,69 @@ test('writeFIT: more than a minute with no readings stops and restarts the timer
   const short = mergeOf([G.parseFile(S.toGPX(line(300).filter((_, i) => i < 100 || i >= 159)), 'b.gpx')]);
   assert.equal(messages(G.writeFIT(short, {}), 21).length, 2);
 });
+
+// ---------- rides with no GPS ----------
+
+test('merge (FIT): an indoor ride with no GPS is merged from its timestamps', () => {
+  const truth = S.indoorRide();
+  const files = S.indoorDemoFiles().map(f => G.parseFile(f.data, f.name));
+  const plan = G.autoPlan(files);
+  assert.equal(G.merge(files, plan).points.length, 0, 'a GPX merge has nothing to write');
+
+  const r = G.merge(files, plan, { format: 'fit' });
+  assert.equal(r.format, 'fit');
+  // Every second of the trainer app, then the watch's last 12 s: it stopped 15 s later, and
+  // seconds within 3 s of the trainer app's last one are left to it.
+  assert.equal(r.inserted, 12);
+  assert.deepEqual(r.points.map(p => p.t), Array.from({ length: truth.length + 12 }, (_, k) => truth[0].t + (k < truth.length ? k : k + 3)));
+  assert.ok(r.points.every(p => p.lat == null));
+  assert.deepEqual(r.fills.map(f => [f.t - truth[0].t, f.ch]), [[1500, 'power'], [1501, 'power'], [1502, 'power']]);
+  r.points.slice(0, truth.length).forEach((p, k) => {
+    assert.equal(p.cad, truth[k].cad);
+    if (k < 1500 || k >= 1503) assert.equal(p.power, truth[k].power);
+  });
+  // Heart rate from the watch, on the trainer's clock: the watch started 25 s late.
+  assert.ok(r.points.slice(0, 25).every(p => p.hr == null));
+  assert.ok(r.points.slice(25).every(p => p.hr != null));
+  assert.equal(r.stats.distance, 0);
+
+  const bytes = G.writeFIT(r, files[plan.base]);
+  const back = FIT.decode(bytes);
+  assert.equal(back.records.length, r.points.length);
+  back.records.forEach((b, i) => {
+    const p = r.points[i];
+    assert.deepEqual(b, Object.fromEntries(Object.entries({ t: p.t, power: p.power, hr: p.hr, cad: p.cad }).filter(([, v]) => v != null)));
+  });
+  const recordDef = FIT.decode(bytes, { messages: true }).messages.find(m => m.global === 20);
+  assert.ok(!(0 in recordDef.fields) && !(78 in recordDef.fields), 'no position or elevation fields at all');
+  const [session] = messages(bytes, 18);
+  assert.deepEqual([session[5], session[6]], [2, 6], 'cycling, indoor cycling (from the trainer app)');
+  assert.ok(!(9 in session) && !(3 in session), 'no distance or start position');
+  assert.equal(G.writeFIT(r, {}).length, bytes.length);
+  assert.equal(messages(G.writeFIT(r, {}), 18)[0][6], 6, 'indoor cycling when nothing says otherwise');
+});
+
+test('merge (FIT): keeps seconds without GPS, borrowing a position only away from the base fixes', () => {
+  const truth = S.ride();
+  const [computer, watch] = outdoorPair(); // the computer loses GPS in a tunnel, samples 2620-2659
+  const plan = G.autoPlan([computer, watch]);
+  const gpx = G.merge([computer, watch], plan);
+  const r = G.merge([computer, watch], plan, { format: 'fit' });
+
+  const tunnel = r.points.filter(p => p.t >= truth[2620].t && p.t < truth[2660].t);
+  assert.equal(tunnel.length, 40, 'every second of the tunnel is kept');
+  assert.ok(tunnel.every(p => p.src === 0 && p.power === truth[p.t - truth[0].t].power), 'with the computer\'s own power');
+  // Within 3 s of the computer's last and next fix there is no position; the 34 s between come from the watch.
+  assert.deepEqual(tunnel.map(p => p.lat != null), Array.from({ length: 40 }, (_, k) => k >= 3 && k < 37));
+  assert.equal(r.borrowed.gps, 34);
+  const fromWatch = new Map(watch.pts.map(p => [p.t + plan.offsets[1], p]));
+  tunnel.filter(p => p.lat != null).forEach(p => assert.equal(p.latS, fromWatch.get(p.t).latS));
+
+  // The GPX made from this merge is the same as the GPX merge, for this pair.
+  assert.equal(r.points.length, gpx.points.length + 6);
+  assert.equal(G.writeGPX(r, { name: 'x' }), G.writeGPX(gpx, { name: 'x' }));
+  assert.equal(r.stats.distance, gpx.stats.distance);
+
+  const back = FIT.decode(G.writeFIT(r, computer)).records;
+  assert.equal(back.filter(b => b.lat == null).length, 6);
+});

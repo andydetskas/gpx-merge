@@ -1,5 +1,6 @@
-// Synthetic rides for the demo button and the tests: one made-up loop, "recorded"
-// by two devices that disagree the way real ones do. No real GPS track is involved.
+// Synthetic rides for the demo links and the tests: one made-up loop and one indoor
+// trainer session, each "recorded" by two devices that disagree the way real ones do.
+// No real GPS track is involved.
 // Runs in the browser (window.GPXSample, after js/fit.js) and in Node.
 (function (root) {
   'use strict';
@@ -122,6 +123,50 @@
     return out;
   }
 
+  // ---------- an indoor session ----------
+
+  // [seconds, watts]: warm-up, four 4-minute intervals with 3 minutes easy, cool-down.
+  const WORKOUT = [[600, 150], [240, 280], [180, 140], [240, 285], [180, 140], [240, 290], [180, 140], [240, 295], [180, 140], [480, 130]];
+
+  // One sample per second of a trainer session in ERG mode: no position, no speed.
+  function indoorRide({ start = 1781456400, seed = 5 } = {}) {
+    const rand = rng(seed);
+    const out = [];
+    let t = start, hr = 88, eased = 100, pause = 0;
+    for (const [secs, watts] of WORKOUT) {
+      for (let i = 0; i < secs; i++, t++) {
+        // Now and then the rider stops pedalling for a few seconds, for a drink or a stretch.
+        if (pause > 0) pause--;
+        else if (rand() < 1 / 240) pause = 3 + Math.floor(rand() * 6);
+        eased += (watts - eased) / 6; // the trainer eases into each new target
+        const power = pause ? 0 : Math.round(eased * (1 + 0.03 * rand.gauss()));
+        const cad = pause ? 0 : Math.round((watts > 200 ? 93 : 87) + 2.5 * rand.gauss());
+        hr += (92 + 0.3 * power - hr) / 25 + 0.4 * rand.gauss();
+        out.push({ t, power, cad, hr: Math.round(hr) });
+      }
+    }
+    return out;
+  }
+
+  // The trainer app's recording (FIT): the smart trainer's power and cadence, no heart rate
+  // (the strap is paired to the watch) and no GPS. Power drops out for 3 s once.
+  function trainerApp(truth) {
+    return truth.map((s, i) => ({ t: s.t, power: i >= 1500 && i < 1503 ? undefined : s.power, cad: s.cad }));
+  }
+
+  // A watch in indoor-bike mode (FIT): wrist heart rate, a few seconds behind, and cadence from
+  // a crank sensor; no GPS. Its clock runs 2 s fast, and it was started 25 s after the trainer
+  // app and stopped 15 s after it.
+  function indoorWatch(truth, seed = 31) {
+    const rand = rng(seed);
+    const out = [];
+    for (let i = 25; i < truth.length + 15; i++) {
+      const k = Math.min(i, truth.length - 1);
+      out.push({ t: truth[0].t + i + 2, hr: Math.round(truth[Math.max(0, k - 4)].hr + 1.5 * rand.gauss()), cad: i < truth.length ? truth[k].cad : 0 });
+    }
+    return out;
+  }
+
   // ---------- writers ----------
 
   const iso = t => new Date(t * 1000).toISOString().replace('.000Z', 'Z');
@@ -147,25 +192,32 @@
     return o.join('\n');
   }
 
-  // An activity FIT with a file id, one record per sample and a session.
-  function toFIT(points, { productName = 'Sample bike computer', manufacturer = 255, sport = 2 } = {}) {
+  // An activity FIT with a file id, one record per sample and a session. Records carry
+  // only the fields some sample has, as a device writes only the sensors it has.
+  function toFIT(points, { productName = 'Sample bike computer', manufacturer = 255, sport = 2, subSport } = {}) {
     const fit = t => t - FIT_EPOCH;
     const msgs = [{
       global: 0, fields: [[0, 'enum', 4], [1, 'uint16', manufacturer], [2, 'uint16', 1], [4, 'uint32', fit(points[0].t)], [8, 'string', productName, 24]],
     }];
+    const present = new Set(points.flatMap(p => Object.keys(p).filter(k => p[k] != null)));
+    const has = k => present.has(k);
     for (const p of points) {
       msgs.push({
         global: 20, local: 1, fields: [
           [253, 'uint32', fit(p.t)],
-          [0, 'sint32', p.lat != null ? semicircles(p.lat) : null],
-          [1, 'sint32', p.lon != null ? semicircles(p.lon) : null],
-          [78, 'uint32', p.ele != null ? Math.round((p.ele + 500) * 5) : null],
-          [3, 'uint8', p.hr], [4, 'uint8', p.cad], [7, 'uint16', p.power], [13, 'sint8', p.atemp],
-        ],
+          has('lat') && [0, 'sint32', p.lat != null ? semicircles(p.lat) : null],
+          has('lon') && [1, 'sint32', p.lon != null ? semicircles(p.lon) : null],
+          has('ele') && [78, 'uint32', p.ele != null ? Math.round((p.ele + 500) * 5) : null],
+          has('hr') && [3, 'uint8', p.hr], has('cad') && [4, 'uint8', p.cad],
+          has('power') && [7, 'uint16', p.power], has('atemp') && [13, 'sint8', p.atemp],
+        ].filter(Boolean),
       });
     }
     const last = points[points.length - 1].t;
-    msgs.push({ global: 18, local: 2, fields: [[253, 'uint32', fit(last)], [2, 'uint32', fit(points[0].t)], [5, 'enum', sport]] });
+    msgs.push({
+      global: 18, local: 2,
+      fields: [[253, 'uint32', fit(last)], [2, 'uint32', fit(points[0].t)], [5, 'enum', sport], subSport != null && [6, 'enum', subSport]].filter(Boolean),
+    });
     return FIT.encode(msgs);
   }
 
@@ -179,7 +231,16 @@
     ];
   }
 
-  const API = { rng, ride, bikeComputer, watch, toGPX, toFIT, demoFiles };
+  // The indoor pair: two FIT files with no GPS, from a trainer app and a watch.
+  function indoorDemoFiles(start) {
+    const truth = indoorRide(start ? { start } : {});
+    return [
+      { name: 'trainer-app.fit', data: toFIT(trainerApp(truth), { productName: 'Sample trainer app', subSport: 6 }) },
+      { name: 'watch.fit', data: toFIT(indoorWatch(truth), { productName: 'Sample watch', subSport: 6 }) },
+    ];
+  }
+
+  const API = { rng, ride, bikeComputer, watch, indoorRide, trainerApp, indoorWatch, toGPX, toFIT, demoFiles, indoorDemoFiles };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   else root.GPXSample = API;
 })(typeof window !== 'undefined' ? window : globalThis);
